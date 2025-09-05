@@ -57,19 +57,24 @@ def norm_text(x: str) -> str:
 def to_number(x):
     if pd.isna(x):
         return None
-    s = str(x)
-    s = s.replace("₺", "").replace("TL", "").strip()
-    # 1.234,56 → 1234.56 ; 1,234.56 → 1234.56
-    s = s.replace(".", "").replace(",", ".")
+    s = str(x).strip().replace("₺", "").replace("TL", "").strip()
+
+    # Türk formatı: binlik ayırıcı nokta ve ondalık virgül
+    if "," in s and "." in s:
+        # Örn: 1.234,56 → 1234.56
+        s = s.replace(".", "").replace(",", ".")
+    else:
+        # İngiliz formatı veya düz sayı
+        s = s.replace(",", ".")
+
     try:
         return float(s)
     except Exception:
+        import re as _re
         try:
-            import re as _re
-            return float(_re.sub(r"[^0-9\.-]", "", s))
+            return float(_re.sub(r"[^0-9\\.-]", "", s))
         except Exception:
             return None
-
 
 @st.cache_data(show_spinner=False)
 def load_and_clean_excel(file_bytes: bytes) -> pd.DataFrame:
