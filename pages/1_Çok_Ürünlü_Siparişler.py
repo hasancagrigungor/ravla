@@ -11,10 +11,22 @@ if df is None or df.empty:
     st.warning("Önce Ana Sayfa'dan veri yükleyin.")
     st.stop()
 
-min_items = st.number_input("Minimum farklı ürün sayısı", min_value=2, step=1, value=2)
+min_items = st.number_input("Farklı ürün sayısı", min_value=1, step=1, value=2)
+
+# Karşılaştırma tipi: ≥, =, ≤, >
+cmp = st.radio("Karşılaştırma", ["≥", "=", "≤", ">"], index=0, horizontal=True)
 
 grp = df.groupby(ORDER_COL)[PRODUCT_COL].nunique().reset_index(name="Farklı Ürün Sayısı")
-mask = grp["Farklı Ürün Sayısı"] >= min_items
+
+if cmp == "≥":
+    mask = grp["Farklı Ürün Sayısı"] >= min_items
+elif cmp == ">":
+    mask = grp["Farklı Ürün Sayısı"] > min_items
+elif cmp == "=":
+    mask = grp["Farklı Ürün Sayısı"] == min_items
+else:  # "≤"
+    mask = grp["Farklı Ürün Sayısı"] <= min_items
+
 many_orders = grp[mask]
 
 st.write(f"Koşulu sağlayan sipariş: **{len(many_orders):,}**")
