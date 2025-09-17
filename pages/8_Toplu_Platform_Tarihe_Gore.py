@@ -51,7 +51,6 @@ def _to_strio(uploaded_file) -> io.StringIO:
 def read_csv_auto(uploaded_file) -> pd.DataFrame:
     """
     Önce C engine + sep=';' dene; olmazsa python engine + sep=None fallback.
-    (python engine 'low_memory' desteklemediği için burada verilmez)
     """
     s1 = _to_strio(uploaded_file)
     try:
@@ -65,7 +64,6 @@ def read_csv_auto(uploaded_file) -> pd.DataFrame:
         return pd.read_csv(s3, sep=None, engine="python", on_bad_lines="skip")
 
 def normalize_columns_keep_all(df: pd.DataFrame, columnsmap: Dict[str, List[str]]) -> pd.DataFrame:
-    """Tüm kolonları koru; eşleşenleri standart isimlere rename et."""
     rename_dict = {}
     for std_col, alt_cols in columnsmap.items():
         for alt in alt_cols:
@@ -80,45 +78,27 @@ def add_source_column(df: pd.DataFrame, source_name: str) -> pd.DataFrame:
     return df
 
 def parse_datetime_series(sr: pd.Series) -> pd.Series:
-    """
-    Kolonu olabilecek tüm yaygın formatlarla datetime'a çevirir.
-    - dayfirst=True
-    - infer_datetime_format=True
-    - Excel seri günleri (tamamen numeric ve klasik aralıkta ise) fallback
-    Sonuç tz-naive datetime64[ns] olur.
-    """
-    # Halihazırda datetime ise normalize etmeden döndür
     if pd.api.types.is_datetime64_any_dtype(sr):
         s = sr
     else:
         s = pd.to_datetime(sr, errors="coerce", dayfirst=True, infer_datetime_format=True)
-
-        # Eğer hiç parse edemediysek ve numeric ise: Excel seri günü ihtimali
         if s.notna().sum() == 0 and pd.api.types.is_numeric_dtype(sr):
             try:
                 s = pd.to_datetime("1899-12-30") + pd.to_timedelta(sr, unit="D")
             except Exception:
                 pass
-
-    # timezone'lu ise tz'yi sıfırla
     try:
         s = s.dt.tz_localize(None)
     except Exception:
         pass
-
     return s
 
 def ensure_target_dates(df: pd.DataFrame, target_cols: List[str]) -> pd.DataFrame:
-    """
-    Hedef tarih kolonları varsa zorla datetime'a çevir.
-    Ek olarak sonunda _parsed_dt_<col> adında normalleştirilmiş (gün bazlı) sütun oluştur.
-    """
     df = df.copy()
     for col in target_cols:
         if col in df.columns:
             parsed = parse_datetime_series(df[col])
             df[col] = parsed
-            # Gün bazlı normalize edilmiş yardımcı sütun (filtre için güvenli)
             df[f"_parsed_dt_{col}"] = parsed.dt.normalize()
     return df
 
@@ -145,30 +125,26 @@ if not dfs:
 
 df = pd.concat(dfs, ignore_index=True)
 
-# Zorunlu: hedef tarih kolonlarını datetime'a çevir
 df = ensure_target_dates(df, TARGET_DATE_COLS)
 
 st.success(f"✅ Birleştirildi: {df.shape[0]} satır, {df.shape[1]} kolon")
 with st.expander("Birleşik DataFrame – ilk 200 satır"):
     st.dataframe(df.head(200), use_container_width=True)
 
-# --- 4) Tarih kolonu seçimi (yalnızca 3 hedef kolon içinden mevcut ve parse edilmiş olanlar) ---
+# --- 4) Tarih kolonu seçimi ---
 st.subheader("⏱️ Filtre Seçenekleri")
 
 available_dt_cols = [c for c in TARGET_DATE_COLS if c in df.columns and df[c].notna().any()]
 if not available_dt_cols:
-    st.error("Hedef tarih kolonlarından hiçbiri bulunamadı ya da parse edilemedi: "
-             f"{', '.join(TARGET_DATE_COLS)}")
+    st.error("Hedef tarih kolonlarından hiçbiri bulunamadı.")
     st.stop()
 
-# Varsayılan tercih: 'siparis_tarihi' varsa o, yoksa ilk mevcut olan
 default_idx = 0
 if "siparis_tarihi" in available_dt_cols:
     default_idx = available_dt_cols.index("siparis_tarihi")
 
 selected_dt_col = st.selectbox("Tarih kolonu seç:", available_dt_cols, index=default_idx)
 
-# Yardımcı normalize edilmiş kolonu kullanarak güvenli aralık çıkar (gün bazlı)
 parsed_helper_col = f"_parsed_dt_{selected_dt_col}"
 if parsed_helper_col not in df.columns or df[parsed_helper_col].notna().sum() == 0:
     st.error(f"Seçilen kolonda geçerli tarih yok: {selected_dt_col}")
@@ -177,7 +153,6 @@ if parsed_helper_col not in df.columns or df[parsed_helper_col].notna().sum() ==
 min_date = df[parsed_helper_col].min().date()
 max_date = df[parsed_helper_col].max().date()
 
-# Varsayılan başlangıç ve bitiş: bugün (ikisi de); dataset aralığına clamp edilir
 today = date.today()
 def clamp(d: date) -> date:
     if d < min_date: return min_date
@@ -193,18 +168,13 @@ with col1:
 with col2:
     end_date = st.date_input("Bitiş Tarihi", value=default_end, min_value=min_date, max_value=max_date)
 
-# Eğer kullanıcı hatayla başlangıcı bitişten büyük seçerse düzelt
 if start_date > end_date:
     st.warning("Başlangıç tarihi bitişten büyük. Bitiş tarihi başlangıca eşitlendi.")
     end_date = start_date
 
 # --- 5) Kaynak filtresi ---
 all_sources = sorted(df["kaynak"].dropna().unique().tolist()) if "kaynak" in df.columns else []
-selected_sources = st.multiselect(
-    "Kaynak seç (boş = hepsi):",
-    all_sources,
-    default=all_sources
-)
+selected_sources = st.multiselect("Kaynak seç (boş = hepsi):", all_sources, default=all_sources)
 
 # --- 6) Filtre uygula ---
 mask_date = (df[parsed_helper_col] >= pd.to_datetime(start_date)) & \
@@ -216,7 +186,14 @@ if selected_sources:
 
 df_filtered = df.loc[mask_date & mask_source].copy()
 
-# Debug/diagnostic bilgileri
+# ✅ Tekilleştirme checkbox'ı
+unique_only = st.checkbox("🔁 Sipariş Numarasına Göre Tekilleştir (Son Kaydı Tut)", value=False)
+if unique_only and "siparis_numarasi" in df_filtered.columns:
+    if selected_dt_col in df_filtered.columns:
+        df_filtered = df_filtered.sort_values(selected_dt_col)
+    df_filtered = df_filtered.drop_duplicates(subset="siparis_numarasi", keep="last")
+
+# --- Debug / Diagnostik ---
 with st.expander("🔎 Parse Diagnostiği"):
     diag = {}
     for c in available_dt_cols:
