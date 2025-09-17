@@ -1,14 +1,19 @@
 # ==================== pages/2_Çok_Sipariş_Verenler.py ====================
 import streamlit as st
 import altair as alt
-from utils import get_df, buyer_summary, BUYER_COL, to_excel_bytes
+from utils import get_df, buyer_summary, BUYER_COL, to_excel_bytes, prepare_page_df, ORDER_COL
 
 st.set_page_config(page_title="Çok Sipariş Verenler", layout="wide")
 st.title("👤 Birden Fazla Sipariş Veren Alıcılar")
 
-df = get_df()
+required_cols = [BUYER_COL, ORDER_COL]
+try:
+    raw_df, df, mapping = prepare_page_df(required_cols, page_key="cok_siparis_verenler")
+except Exception as e:
+    st.warning(str(e))
+    st.stop()
 if df is None or df.empty:
-    st.warning("Önce Ana Sayfa'dan veri yükleyin.")
+    st.warning("Veri bulunamadı veya boş.")
     st.stop()
 
 summary = buyer_summary(df)

@@ -3,26 +3,30 @@ import streamlit as st
 import pandas as pd
 import pydeck as pdk
 from utils import (
-    get_df, build_full_address, geocode_unique_addresses, PRODUCT_COL, QTY_COL,
-    ORDER_COL, BUYER_COL, to_excel_bytes
+    get_df, build_full_address, geocode_unique_addresses, geocode_il_ilce, PRODUCT_COL, QTY_COL,
+    ORDER_COL, BUYER_COL, to_excel_bytes, prepare_page_df
 )
 
 st.set_page_config(page_title="Harita — Ürün Bazlı", layout="wide")
 st.title("🗺️ Haritada Görselleştirme (Ürün Bazlı)")
 
-df = get_df()
+required_cols = ["İl", "İlçe", PRODUCT_COL, QTY_COL]
+try:
+    raw_df, df, mapping = prepare_page_df(required_cols, page_key="harita")
+except Exception as e:
+    st.warning(str(e))
+    st.stop()
 if df is None or df.empty:
-    st.warning("Önce Ana Sayfa'dan veri yükleyin.")
+    st.warning("Veri bulunamadı veya boş.")
     st.stop()
 
-# Adres alanlarını seçtirme
-st.subheader("Adres Bileşimi")
-use_full = st.toggle("Sadece tam Teslimat Adresi kullan", value=False)
-if use_full and "Teslimat Adresi" in df.columns:
-    addr_series = df["Teslimat Adresi"].fillna("").astype(str)
-else:
-    use_fields = [c for c in ["Teslimat Adresi", "İlçe", "İl"] if c in df.columns]
-    addr_series = build_full_address(df, use_fields)
+# Sadece İl ve İlçe bazlı çalışacağız (daha hızlı)
+st.info("Harita yalnızca İl ve İlçe bazında çalışır (hızlı). Eksik İl/İlçe olan satırlar atılabilir.")
+use_fields = [c for c in ["İl", "İlçe"] if c in df.columns]
+if len(use_fields) < 1:
+    st.error("Veride 'İl' veya 'İlçe' sütunu bulunamadı.")
+    st.stop()
+addr_series = build_full_address(df, use_fields)
 
 # Ürün filtresi (çok seçim)
 products = sorted(df[PRODUCT_COL].dropna().astype(str).unique())
@@ -30,23 +34,25 @@ sel_products = st.multiselect("Ürün(ler) seç (haritaya yansır)", products, d
 
 # Veriyi filtrele ve konumları oluştur
 fdf = df[df[PRODUCT_COL].isin(sel_products)].copy()
-fdf["__addr__"] = addr_series
+fdf["__il__"] = fdf[[c for c in ["İl", "İlçe"] if c in fdf.columns][0]] if "İl" in fdf.columns else None
+fdf["__ilce__"] = fdf[[c for c in ["İlçe", "İl"] if c in fdf.columns][0]] if "İlçe" in fdf.columns else None
 
-# Tekilleştirilmiş adresler
-uniq_addrs = sorted(set([a for a in fdf["__addr__"].dropna().astype(str) if a.strip()]))
-cap = st.number_input("En fazla kaç benzersiz adres geocode edilsin?", min_value=100, max_value=20000, value=min(5000, len(uniq_addrs)))
-uniq_addrs = uniq_addrs[:cap]
+# Tekilleştirilen il-ilçe çiftleri
+pairs = sorted(set([(str(x).strip(), str(y).strip()) for x, y in zip(fdf["İl"].fillna(""), fdf["İlçe"].fillna("")) if str(x).strip() or str(y).strip()]))
+cap = st.number_input("En fazla kaç benzersiz il-ilçe geocode edilsin?", min_value=10, max_value=20000, value=min(1000, len(pairs)))
+pairs = pairs[:cap]
 
 provider = st.selectbox("Geocode sağlayıcı", options=["ArcGIS", "Nominatim"], index=0, help="ArcGIS genelde daha stabil ve hızlıdır. Nominatim halka açık ve limitlidir.")
 
-if st.button("Adresleri Koordinata Çevir (Geocode)"):
-    geo = geocode_unique_addresses(uniq_addrs, provider=provider)
-    st.session_state["__GEO_CACHE__"] = geo
+if st.button("İl-İlçe Koordinatlarını Al (Cache kullanılır)"):
+    geo_pairs = geocode_il_ilce(pairs, provider=provider)
+    st.session_state["__GEO_CACHE__"] = geo_pairs
 
-geo = st.session_state.get("__GEO_CACHE__")
-if isinstance(geo, pd.DataFrame) and not geo.empty:
-    # Join ile koordinatları satırlara bağla
-    gdf = fdf.merge(geo, left_on="__addr__", right_on="address", how="left")
+geo_pairs = st.session_state.get("__GEO_CACHE__")
+if isinstance(geo_pairs, pd.DataFrame) and not geo_pairs.empty:
+    # Join ile koordinatları satırlara bağla: önce il-ilçe -> lat/lon
+    geo_pairs = geo_pairs.dropna(subset=["lat", "lon"])  # koordinatı olmayanları at
+    gdf = fdf.merge(geo_pairs, left_on=["İl", "İlçe"], right_on=["il", "ilce"], how="left")
     gdf = gdf.dropna(subset=["lat", "lon"])  # koordinatı olmayanları at
 
     st.success(f"Haritada gösterilecek satır: {len(gdf):,}")

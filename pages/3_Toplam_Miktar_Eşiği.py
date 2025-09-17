@@ -1,14 +1,19 @@
 # ==================== pages/3_Toplam_Miktar_Eşiği.py ====================
 import streamlit as st
 import altair as alt
-from utils import get_df, buyers_over_total_qty, BUYER_COL, to_excel_bytes
+from utils import get_df, buyers_over_total_qty, BUYER_COL, to_excel_bytes, prepare_page_df, QTY_COL
 
 st.set_page_config(page_title="Toplam Miktar Eşiği", layout="wide")
 st.title("📈 Toplam Adet Eşiğini Aşan Alıcılar")
 
-df = get_df()
+required_cols = [BUYER_COL, QTY_COL]
+try:
+    raw_df, df, mapping = prepare_page_df(required_cols, page_key="toplam_adet_esigi")
+except Exception as e:
+    st.warning(str(e))
+    st.stop()
 if df is None or df.empty:
-    st.warning("Önce Ana Sayfa'dan veri yükleyin.")
+    st.warning("Veri bulunamadı veya boş.")
     st.stop()
 
 over = buyers_over_total_qty(df)

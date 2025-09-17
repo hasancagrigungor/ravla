@@ -1,14 +1,19 @@
 # = pages/4_Aynı_Ürünü_Farklı_Siparişlerde_Alanlar.py =
 import streamlit as st
 import altair as alt
-from utils import get_df, same_product_across_distinct_orders, PRODUCT_COL, BUYER_COL, to_excel_bytes
+from utils import get_df, same_product_across_distinct_orders, PRODUCT_COL, BUYER_COL, to_excel_bytes, prepare_page_df, ORDER_COL
 
 st.set_page_config(page_title="Ürün Bazlı Farklı Siparişler", layout="wide")
 st.title("🔁 Aynı Ürünü Farklı Siparişlerde Alanlar")
 
-df = get_df()
+required_cols = [PRODUCT_COL, BUYER_COL, ORDER_COL]
+try:
+    raw_df, df, mapping = prepare_page_df(required_cols, page_key="urun_farkli_siparis")
+except Exception as e:
+    st.warning(str(e))
+    st.stop()
 if df is None or df.empty:
-    st.warning("Önce Ana Sayfa'dan veri yükleyin.")
+    st.warning("Veri bulunamadı veya boş.")
     st.stop()
 
 products = sorted(df[PRODUCT_COL].dropna().astype(str).unique())

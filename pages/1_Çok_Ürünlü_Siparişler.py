@@ -1,14 +1,19 @@
 # ====================== pages/1_Çok_Ürünlü_Siparişler.py ======================
 import streamlit as st
 import altair as alt
-from utils import get_df, ORDER_COL, PRODUCT_COL, to_excel_bytes
+from utils import get_df, ORDER_COL, PRODUCT_COL, to_excel_bytes, prepare_page_df
 
 st.set_page_config(page_title="Çok Ürünlü Siparişler", layout="wide")
 st.title("🧺 Tek Siparişte Birden Fazla Ürün")
 
-df = get_df()
+required_cols = [ORDER_COL, PRODUCT_COL]
+try:
+    raw_df, df, mapping = prepare_page_df(required_cols, page_key="cok_urunlu")
+except Exception as e:
+    st.warning(str(e))
+    st.stop()
 if df is None or df.empty:
-    st.warning("Önce Ana Sayfa'dan veri yükleyin.")
+    st.warning("Veri bulunamadı veya boş.")
     st.stop()
 
 min_items = st.number_input("Farklı ürün sayısı", min_value=1, step=1, value=2)

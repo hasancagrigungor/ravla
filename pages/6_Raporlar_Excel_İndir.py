@@ -2,15 +2,20 @@
 import streamlit as st
 from utils import (
     get_df, buyer_summary, orders_with_many_products, buyers_over_total_qty,
-    ORDER_COL, PRODUCT_COL, BUYER_COL, QTY_COL, to_excel_bytes
+    ORDER_COL, PRODUCT_COL, BUYER_COL, QTY_COL, to_excel_bytes, prepare_page_df
 )
 
 st.set_page_config(page_title="Raporlar — Excel İndir", layout="wide")
 st.title("📥 Raporlar — Toplu Excel İndir")
 
-df = get_df()
+required_cols = [ORDER_COL, PRODUCT_COL, BUYER_COL, QTY_COL]
+try:
+    raw_df, df, mapping = prepare_page_df(required_cols, page_key="raporlar")
+except Exception as e:
+    st.warning(str(e))
+    st.stop()
 if df is None or df.empty:
-    st.warning("Önce Ana Sayfa'dan veri yükleyin.")
+    st.warning("Veri bulunamadı veya boş.")
     st.stop()
 
 st.subheader("Parametreler")
