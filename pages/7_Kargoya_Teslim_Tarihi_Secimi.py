@@ -19,18 +19,26 @@ if not kargoya_col:
     st.error("'Kargoya Teslim Tarihi' sütunu bulunamadı. Lütfen eşleştirme yapın.")
     st.stop()
 
-# parse to datetime and extract date
-df[kargoya_col] = pd.to_datetime(df[kargoya_col], errors="coerce")
+# Convert ALL date columns to datetime.date for consistent formatting with Streamlit
+date_keywords = ["tarih", "tarihi", "date", "time"]
+for col in df.columns:
+    col_lower = str(col).lower()
+    if any(keyword in col_lower for keyword in date_keywords):
+        try:
+            df[col] = pd.to_datetime(df[col], errors="coerce").dt.date
+        except:
+            pass  # Skip if conversion fails
+
 if df[kargoya_col].dropna().empty:
     st.warning("Kargoya Teslim Tarihi sütununda geçerli tarih bulunamadı.")
 
-available_dates = sorted(df[kargoya_col].dropna().dt.date.unique())
+available_dates = sorted(df[kargoya_col].dropna().unique())
 if not available_dates:
     st.info("Veride seçilebilir 'Kargoya Teslim Tarihi' yok.")
     st.stop()
 
 sel_dates = st.multiselect("Kargoya Teslim Tarihi(ler) seçin", options=available_dates, default=available_dates[:1])
-only_selected = df[df[kargoya_col].dt.date.isin(sel_dates)] if sel_dates else pd.DataFrame(columns=df.columns)
+only_selected = df[df[kargoya_col].isin(sel_dates)] if sel_dates else pd.DataFrame(columns=df.columns)
 
 # Göster: kullanılabilir tarihlerin listesi (dataframe olarak)
 st.write("### Kullanılabilir Kargoya Teslim Tarihleri")
@@ -95,7 +103,7 @@ if sel_dates:
     # Ayrıca hangi tarihte hangi üründen kaç adet gerektiği tablosu
     st.write("### Tarih-Ürün Kırılımı")
     if prod_col and qty_col:
-        only_selected["_date"] = only_selected[kargoya_col].dt.date
+        only_selected["_date"] = only_selected[kargoya_col]  # Already converted to date above
         # Expand product splitting similar to above, but keep date
         rows = []
         for _, r in only_selected[["_date", prod_col, qty_col]].dropna().iterrows():
