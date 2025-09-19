@@ -1,230 +1,304 @@
 # app.py
 import streamlit as st
 import pandas as pd
+import numpy as np
 import io
-import os
-from typing import List, Dict
-from datetime import date
+from datetime import datetime, timedelta, date
+from matplotlib.backends.backend_pdf import PdfPages
+import matplotlib.pyplot as plt
 
-st.set_page_config(page_title="Sipariş Birleştir & Tarih/Kaynak Filtresi", layout="wide")
-st.title("📦 Sipariş CSV Birleştirici + Tarih & Kaynak Filtresi")
+st.set_page_config(page_title="Sipariş Analizi (Trendyol + Hepsiburada)", layout="wide")
+st.title("📦 Sipariş Birleştirici & Analiz Paneli")
 
-# --- 1) Standart kolon eşleme ---
-COLUMNS_MAP: Dict[str, List[str]] = {
-    'barkod': ['Barkod'],
-    'paket_numarasi': ['Paket Numarası', 'Paket No'],
-    'kargo_firmasi': ['Kargo Firması'],
-    'siparis_tarihi': ['Sipariş Tarihi'],
-    'son_teslim_tarihi': ['Kargoya Son Teslim Tarihi', 'Termin Süresinin Bittiği Tarih'],
-    'kargo_takip_no': ['Kargo Takip No', 'Kargo Kodu'],
-    'desi': ['Desi', 'Kargodan alınan desi', 'Hesapladığım desi'],
-    'kargoya_teslim_tarihi': ['Kargo Kabul Tarihi', 'Kargoya Teslim Tarihi'],
-    'siparis_numarasi': ['Sipariş Numarası'],
-    'alici': ['Alıcı'],
-    'teslimat_adresi': ['Teslimat Adresi'],
-    'sehir': ['Şehir', 'İl'],
-    'ilce': ['Semt', 'İlçe'],
-    'platform_urun_kodu': ['Hepsiburada Ürün Kodu'],
-    'stok_kodu': ['Satıcı Stok Kodu', 'Stok Kodu'],
-    'urun_adi': ['Ürün Adı'],
-    'adet': ['Adet'],
-    'birim_fiyat': ['Birim Listeleme Fiyatı', 'Birim Fiyatı'],
-    'satis_tutari': ['Faturalandırılacak Birim Satış Fiyatı', 'Faturalandırılacak Satış Fiyatı', 'Satış Tutarı', 'Faturalanacak Tutar'],
-    'komisyon_tutari': ['Komisyon Tutarı (KDV Dahil)', 'HB alacağı net Komisyon Tutarı (KDV dahil)'],
-    'komisyon_orani': ['Komisyon Oranı'],
-    'fatura_adresi': ['Fatura Adresi'],
-    'siparis_durumu': ['Paket Durumu', 'Sipariş Statüsü'],
-    'teslim_tarihi': ['Teslim Tarihi'],
-    'email': ['Alıcı Mail Adresi', 'E-Posta'],
-    'etgb_numarasi': ['ETGB Numarası', 'ETGB No'],
-    'etgb_tarihi': ['ETGB Tarihi ', 'ETGB Tarihi'],
-    'uluslararasi_siparis': ['Uluslararası Sipariş mi?', 'Mikro İhracat']
+# -----------------------------
+# Yardımcı Fonksiyonlar
+# -----------------------------
+COLUMNS_MAP = {
+    # Standard -> olası kaynak başlıkları
+    "barkod": ["Barkod"],
+    "paketno": ["Paket Numarası", "Paket No", "Paket No."],
+    "kargo": ["Kargo Firması"],
+    "siparis_tarihi": ["Sipariş Tarihi"],
+    "kargo_kabul_tarihi": [
+        "Kargo Kabul Tarihi",
+        "Kargoya Teslim Tarihi",
+        "Kargoya Son Teslim Tarihi",  # bazı TY dosyalarında olabilir
+    ],
+    "kargo_no": ["Kargo Takip No", "Kargo Kodu"],
+    "siparis_no": ["Sipariş Numarası"],
+    "urun": ["Ürün Adı"],
+    "adet": ["Adet"],
+    "paket": ["Paket Durumu", "Sipariş Statüsü"],
+    "teslim": ["Teslim Tarihi"],
 }
 
-TARGET_DATE_COLS = ["siparis_tarihi", "son_teslim_tarihi", "kargoya_teslim_tarihi"]
+def detect_source_from_name(name: str) -> str:
+    n = name.lower()
+    if "trendyol" in n or "ty" in n:
+        return "trendyol"
+    if "hepsiburada" in n or "hb" in n or "hepsi" in n:
+        return "hepsiburada"
+    return "bilinmiyor"
 
-# --- 2) Yardımcılar ---
-def _to_strio(uploaded_file) -> io.StringIO:
-    return io.StringIO(uploaded_file.getvalue().decode("utf-8", errors="ignore"))
-
-@st.cache_data(show_spinner=False)
-def read_csv_auto(uploaded_file) -> pd.DataFrame:
-    """
-    Önce C engine + sep=';' dene; olmazsa python engine + sep=None fallback.
-    """
-    s1 = _to_strio(uploaded_file)
+def read_csv_safely(file) -> pd.DataFrame:
+    # Hepsiburada çoğu zaman ; ile gelir. Önce ; deneriz, olmazsa , deneriz.
     try:
-        df = pd.read_csv(s1, sep=";", engine="c", low_memory=False, on_bad_lines="skip")
-        if len(df.columns) == 1:  # yanlış ayrılmış olabilir
-            s2 = _to_strio(uploaded_file)
-            df = pd.read_csv(s2, sep=None, engine="python", on_bad_lines="skip")
-        return df
+        df = pd.read_csv(file, sep=";", low_memory=False)
+        # Boş/tek kolon geldiyse alternatif dene
+        if df.shape[1] <= 1:
+            file.seek(0)
+            df = pd.read_csv(file, sep=",", low_memory=False)
     except Exception:
-        s3 = _to_strio(uploaded_file)
-        return pd.read_csv(s3, sep=None, engine="python", on_bad_lines="skip")
+        file.seek(0)
+        df = pd.read_csv(file, sep=",", low_memory=False)
+    return df
 
-def normalize_columns_keep_all(df: pd.DataFrame, columnsmap: Dict[str, List[str]]) -> pd.DataFrame:
-    rename_dict = {}
-    for std_col, alt_cols in columnsmap.items():
-        for alt in alt_cols:
-            if alt in df.columns:
-                rename_dict[alt] = std_col
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    out = pd.DataFrame()
+    for std_col, candidates in COLUMNS_MAP.items():
+        for c in candidates:
+            if c in df.columns:
+                out[std_col] = df[c]
                 break
-    return df.rename(columns=rename_dict)
+        # bulunamazsa oluştur
+        if std_col not in out.columns:
+            out[std_col] = np.nan
+    # tip düzeltmeleri
+    # adet
+    out["adet"] = pd.to_numeric(out["adet"], errors="coerce").fillna(0).astype(int)
+    # string kolonlar
+    for c in ["barkod", "paketno", "kargo", "kargo_no", "siparis_no", "urun", "paket"]:
+        out[c] = out[c].astype(str).str.strip()
+    return out
 
-def add_source_column(df: pd.DataFrame, source_name: str) -> pd.DataFrame:
-    df = df.copy()
-    df["kaynak"] = source_name
-    return df
-
-def parse_datetime_series(sr: pd.Series) -> pd.Series:
-    if pd.api.types.is_datetime64_any_dtype(sr):
-        s = sr
-    else:
-        s = pd.to_datetime(sr, errors="coerce", dayfirst=True, infer_datetime_format=True)
-        if s.notna().sum() == 0 and pd.api.types.is_numeric_dtype(sr):
-            try:
-                s = pd.to_datetime("1899-12-30") + pd.to_timedelta(sr, unit="D")
-            except Exception:
-                pass
-    try:
-        s = s.dt.tz_localize(None)
-    except Exception:
-        pass
-    return s
-
-def ensure_target_dates(df: pd.DataFrame, target_cols: List[str]) -> pd.DataFrame:
-    df = df.copy()
-    for col in target_cols:
+def parse_dates_inplace(df: pd.DataFrame):
+    for col in ["siparis_tarihi", "kargo_kabul_tarihi", "teslim"]:
         if col in df.columns:
-            parsed = parse_datetime_series(df[col])
-            df[col] = parsed
-            df[f"_parsed_dt_{col}"] = parsed.dt.normalize()
-    return df
+            df[col] = pd.to_datetime(df[col], errors="coerce", dayfirst=True).dt.date
 
-# --- 3) Dosyaları oku & birleştir ---
-uploaded_files = st.file_uploader("CSV dosyalarını yükle (çoklu)", type=["csv"], accept_multiple_files=True)
-if not uploaded_files:
-    st.info("👆 CSV dosyalarını yükle.")
-    st.stop()
+def kpi_metrics(df_filtered: pd.DataFrame):
+    # Toplam Alışveriş (unique paket)
+    toplam_alisveris = df_filtered["paketno"].nunique()
+    # Toplam Ürün (unique urun)
+    toplam_urun = df_filtered["urun"].nunique()
+    # Toplam Adet
+    toplam_adet = df_filtered["adet"].sum()
 
-dfs = []
-for uf in uploaded_files:
-    try:
-        raw = read_csv_auto(uf)
-    except Exception as e:
-        st.error(f"{uf.name} okunamadı: {e}")
-        continue
-    df_norm = normalize_columns_keep_all(raw, COLUMNS_MAP)
-    df_norm = add_source_column(df_norm, os.path.basename(uf.name))
-    dfs.append(df_norm)
+    c1, c2, c3 = st.columns(3)
+    c1.metric("🧾 Toplam Alışveriş (Paket)", f"{toplam_alisveris}")
+    c2.metric("🛍️ Toplam Ürün (Benzersiz)", f"{toplam_urun}")
+    c3.metric("📦 Toplam Adet", f"{toplam_adet:,}".replace(",", "."))
 
-if not dfs:
-    st.error("Hiç dosya yüklenemedi.")
-    st.stop()
+def build_pdf(df_filtered: pd.DataFrame, df_daily: pd.DataFrame, df_top_urun: pd.DataFrame, chosen_date_col: str) -> bytes:
+    buf = io.BytesIO()
+    with PdfPages(buf) as pdf:
+        # Sayfa 1: KPI'lar
+        fig = plt.figure(figsize=(8.27, 11.69))  # A4 portre
+        plt.axis('off')
+        plt.text(0.5, 0.95, "Sipariş Analiz Özeti", ha='center', fontsize=18, fontweight='bold')
+        plt.text(0.5, 0.91, f"Tarih Alanı: {chosen_date_col}", ha='center', fontsize=10)
 
-df = pd.concat(dfs, ignore_index=True)
+        toplam_alisveris = df_filtered["paketno"].nunique()
+        toplam_urun = df_filtered["urun"].nunique()
+        toplam_adet = int(df_filtered["adet"].sum())
 
-df = ensure_target_dates(df, TARGET_DATE_COLS)
+        txt = (
+            f"Toplam Alışveriş (Paket): {toplam_alisveris}\n"
+            f"Toplam Ürün (Benzersiz): {toplam_urun}\n"
+            f"Toplam Adet: {toplam_adet}\n"
+            f"Trendyol/Hepsiburada Kırılımı:\n"
+        )
+        plt.text(0.1, 0.80, txt, va='top', fontsize=12)
 
-st.success(f"✅ Birleştirildi: {df.shape[0]} satır, {df.shape[1]} kolon")
-with st.expander("Birleşik DataFrame – ilk 200 satır"):
-    st.dataframe(df.head(200), use_container_width=True)
+        if "kaynak" in df_filtered.columns:
+            brk = df_filtered.groupby("kaynak").agg(
+                paket_sayisi=("paketno", "nunique"),
+                adet=("adet", "sum")
+            ).reset_index()
+            tbl_text = "\n".join([f"- {r.kaynak}: paket={r.paket_sayisi}, adet={r.adet}" for _, r in brk.iterrows()])
+            plt.text(0.1, 0.63, tbl_text if not brk.empty else "- veri yok", va='top', fontsize=12)
 
-# --- 4) Tarih kolonu seçimi ---
-st.subheader("⏱️ Filtre Seçenekleri")
+        pdf.savefig(fig, bbox_inches='tight')
+        plt.close(fig)
 
-available_dt_cols = [c for c in TARGET_DATE_COLS if c in df.columns and df[c].notna().any()]
-if not available_dt_cols:
-    st.error("Hedef tarih kolonlarından hiçbiri bulunamadı.")
-    st.stop()
+        # Sayfa 2: Top 10 ürün bar
+        if not df_top_urun.empty:
+            fig = plt.figure(figsize=(11.69, 8.27))  # A4 yatay
+            top10 = df_top_urun.head(10)
+            plt.barh(top10["urun"][::-1], top10["adet_toplam"][::-1])
+            plt.title("En Çok Satan 10 Ürün (Adet)")
+            plt.xlabel("Adet")
+            plt.ylabel("Ürün")
+            plt.tight_layout()
+            pdf.savefig(fig)
+            plt.close(fig)
 
-default_idx = 0
-if "siparis_tarihi" in available_dt_cols:
-    default_idx = available_dt_cols.index("siparis_tarihi")
+        # Sayfa 3: Günlük satış (adet) çizgi
+        if not df_daily.empty:
+            fig = plt.figure(figsize=(11.69, 8.27))
+            plt.plot(df_daily[chosen_date_col], df_daily["adet"], marker="o")
+            plt.title("Günlere Göre Toplam Adet")
+            plt.xlabel("Tarih")
+            plt.ylabel("Adet")
+            plt.grid(True, alpha=0.3)
+            plt.tight_layout()
+            pdf.savefig(fig)
+            plt.close(fig)
 
-selected_dt_col = st.selectbox("Tarih kolonu seç:", available_dt_cols, index=default_idx)
+    buf.seek(0)
+    return buf.read()
 
-parsed_helper_col = f"_parsed_dt_{selected_dt_col}"
-if parsed_helper_col not in df.columns or df[parsed_helper_col].notna().sum() == 0:
-    st.error(f"Seçilen kolonda geçerli tarih yok: {selected_dt_col}")
-    st.stop()
+# -----------------------------
+# Sidebar: Yükleme & Kontroller
+# -----------------------------
 
-min_date = df[parsed_helper_col].min().date()
-max_date = df[parsed_helper_col].max().date()
+st.subheader("⚙️ Ayarlar")  # Artık ana gövde içinde
 
-today = date.today()
-def clamp(d: date) -> date:
-    if d < min_date: return min_date
-    if d > max_date: return max_date
-    return d
-
-default_start = clamp(today)
-default_end = clamp(today)
-
-col1, col2 = st.columns(2)
-with col1:
-    start_date = st.date_input("Başlangıç Tarihi", value=default_start, min_value=min_date, max_value=max_date)
-with col2:
-    end_date = st.date_input("Bitiş Tarihi", value=default_end, min_value=min_date, max_value=max_date)
-
-if start_date > end_date:
-    st.warning("Başlangıç tarihi bitişten büyük. Bitiş tarihi başlangıca eşitlendi.")
-    end_date = start_date
-
-# --- 5) Kaynak filtresi ---
-all_sources = sorted(df["kaynak"].dropna().unique().tolist()) if "kaynak" in df.columns else []
-selected_sources = st.multiselect("Kaynak seç (boş = hepsi):", all_sources, default=all_sources)
-
-# --- 6) Filtre uygula ---
-mask_date = (df[parsed_helper_col] >= pd.to_datetime(start_date)) & \
-            (df[parsed_helper_col] <= pd.to_datetime(end_date))
-
-mask_source = True
-if selected_sources:
-    mask_source = df["kaynak"].isin(selected_sources)
-
-df_filtered = df.loc[mask_date & mask_source].copy()
-
-# ✅ Tekilleştirme checkbox'ı
-unique_only = st.checkbox("🔁 Sipariş Numarasına Göre Tekilleştir (Son Kaydı Tut)", value=False)
-if unique_only and "siparis_numarasi" in df_filtered.columns:
-    if selected_dt_col in df_filtered.columns:
-        df_filtered = df_filtered.sort_values(selected_dt_col)
-    df_filtered = df_filtered.drop_duplicates(subset="siparis_numarasi", keep="last")
-
-# --- Debug / Diagnostik ---
-with st.expander("🔎 Parse Diagnostiği"):
-    diag = {}
-    for c in available_dt_cols:
-        diag[c] = {
-            "non_null": int(df[c].notna().sum()),
-            "null": int(df[c].isna().sum()),
-            "min": str(df[c].min()) if df[c].notna().any() else None,
-            "max": str(df[c].max()) if df[c].notna().any() else None,
-        }
-    st.json(diag)
-
-st.info(f"📅 {start_date} — {end_date} | Kaynak: {', '.join(selected_sources) if selected_sources else 'Tümü'} | "
-        f"Eşleşen satır: {df_filtered.shape[0]}")
-st.dataframe(df_filtered, use_container_width=True, height=450)
-
-# --- 7) Görselleştirme ---
-st.subheader("📊 Günlük Sipariş Grafiği")
-if not df_filtered.empty:
-    daily_counts = df_filtered.groupby(df_filtered[parsed_helper_col].dt.date).size()
-    st.bar_chart(daily_counts)
-else:
-    st.warning("Filtre sonrası veri yok.")
-
-# --- 8) CSV İndirme ---
-@st.cache_data(show_spinner=False)
-def to_csv_bytes(_df: pd.DataFrame) -> bytes:
-    return _df.to_csv(index=False).encode("utf-8")
-
-st.download_button(
-    "⬇️ Filtrelenmiş CSV",
-    data=to_csv_bytes(df_filtered),
-    file_name=f"filtered_{selected_dt_col}_{start_date}_{end_date}.csv",
-    mime="text/csv"
+# ---- 1) Dosya yükleme (tek satırda tam genişlik) ----
+uploaded = st.file_uploader(
+    "CSV dosyalarını yükleyin (çoklu seçim desteklenir)",
+    type=["csv"],
+    accept_multiple_files=True,
+    help="Dosya adında 'trendyol' veya 'hb/hepsiburada' geçerse kaynak otomatik atanır."
 )
+
+# ---- 2) Tarih ve filtre ayarları (yan yana kolonlar) ----
+today = date.today()
+default_start = today - timedelta(days=30)
+
+col1, col2, col3 = st.columns([1, 1, 1])
+
+with col1:
+    date_col_choice = st.selectbox(
+        "📅 Tarih filtresi kolon",
+        options=["siparis_tarihi", "kargo_kabul_tarihi", "teslim"],
+        index=0,
+        help="Seçilen kolon tarih aralığı filtresinde kullanılacaktır."
+    )
+
+with col2:
+    start_date = st.date_input("Başlangıç", value=default_start)
+
+with col3:
+    end_date = st.date_input("Bitiş", value=today)
+
+# Hata kontrolü
+if start_date > end_date:
+    st.error("❌ Başlangıç tarihi, bitiş tarihinden büyük olamaz.")
+
+# -----------------------------
+# Veri Yükleme & Birleştirme
+# -----------------------------
+all_rows = []
+
+if uploaded:
+    for uf in uploaded:
+        src = detect_source_from_name(uf.name)
+        df_raw = read_csv_safely(uf)
+        df_norm = normalize_columns(df_raw)
+        parse_dates_inplace(df_norm)
+        df_norm["kaynak"] = src
+        all_rows.append(df_norm)
+
+if all_rows:
+    df = pd.concat(all_rows, ignore_index=True)
+
+    # Tarih filtresi
+    if date_col_choice not in df.columns:
+        st.warning(f"Seçilen tarih kolonu '{date_col_choice}' veride bulunamadı. Otomatik 'siparis_tarihi' denenecek.")
+        effective_date_col = "siparis_tarihi"
+    else:
+        effective_date_col = date_col_choice
+
+    # sadece tarih değeri olan satırlar
+    df = df[~df[effective_date_col].isna()].copy()
+
+    mask = (df[effective_date_col] >= start_date) & (df[effective_date_col] <= end_date)
+    df_filtered = df.loc[mask].copy()
+
+    # Paket özelinde unique (ilk görülen)
+    dfg = df_filtered.sort_values(by=[effective_date_col]).drop_duplicates(subset=["paketno"], keep="first")
+
+    # Üst KPI'lar
+    kpi_metrics(df_filtered)
+
+    # Alt bölüm: grafikler ve tablolar
+    st.subheader("📈 Analizler")
+
+    # Günlük toplamlara göre tablo/çizgi
+    if not df_filtered.empty:
+        daily = df_filtered.groupby(effective_date_col, as_index=False).agg(
+            paket_sayisi=("paketno", "nunique"),
+            adet=("adet", "sum")
+        )
+        # En çok satan ürünler (adet)
+        top_urun = df_filtered.groupby("urun", as_index=False).agg(adet_toplam=("adet", "sum")).sort_values("adet_toplam", ascending=False)
+
+        # Layout
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("**Günlere Göre Toplam Adet**")
+            st.line_chart(
+                data=daily.set_index(effective_date_col)["adet"],
+                use_container_width=True
+            )
+        with c2:
+            st.markdown("**En Çok Satan 10 Ürün (Adet)**")
+            st.bar_chart(
+                data=top_urun.head(10).set_index("urun")["adet_toplam"],
+                use_container_width=True
+            )
+
+        # Kaynak kırılımı
+        st.markdown("### 🧩 Kaynak Kırılımı")
+        by_src = df_filtered.groupby("kaynak", as_index=False).agg(
+            paket_sayisi=("paketno", "nunique"),
+            adet=("adet", "sum")
+        )
+        st.dataframe(by_src, use_container_width=True)
+
+        # Tablolar
+        with st.expander("🔎 Satır Bazlı (Filtrelenmiş)"):
+            st.dataframe(df_filtered, use_container_width=True)
+        with st.expander("📦 Paket Bazlı (Unique)"):
+            st.dataframe(dfg, use_container_width=True)
+        with st.expander("📅 Günlük Özet"):
+            st.dataframe(daily, use_container_width=True)
+        with st.expander("🏷️ Ürün Özet (Adet)"):
+            st.dataframe(top_urun, use_container_width=True)
+
+        # İndirme: Excel
+        xbuf = io.BytesIO()
+        with pd.ExcelWriter(xbuf, engine="xlsxwriter") as writer:
+            df_filtered.to_excel(writer, index=False, sheet_name="satirlar")
+            dfg.to_excel(writer, index=False, sheet_name="paketler")
+            daily.to_excel(writer, index=False, sheet_name="gunluk_ozet")
+            top_urun.to_excel(writer, index=False, sheet_name="urun_ozet")
+            by_src.to_excel(writer, index=False, sheet_name="kaynak_ozet")
+        xbuf.seek(0)
+        st.download_button(
+            label="⬇️ Excel indir",
+            data=xbuf.getvalue(),
+            file_name=f"siparis_analiz_{start_date}_{end_date}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+        # İndirme: PDF (KPI + 2 grafik)
+        pdf_bytes = build_pdf(
+            df_filtered=df_filtered,
+            df_daily=daily.rename(columns={effective_date_col: "tarih"}).rename(columns={"tarih": effective_date_col}),
+            df_top_urun=top_urun,
+            chosen_date_col=effective_date_col
+        )
+        st.download_button(
+            label="⬇️ PDF indir (KPI + Grafikler)",
+            data=pdf_bytes,
+            file_name=f"siparis_ozet_{start_date}_{end_date}.pdf",
+            mime="application/pdf"
+        )
+
+    else:
+        st.info("Seçtiğiniz tarih aralığında veri bulunamadı. Tarih aralığını genişletmeyi deneyin.")
+
+else:
+    st.info("Başlamak için soldan CSV dosyalarınızı yükleyin. Dosya adında 'trendyol' veya 'hb/hepsiburada' geçerse kaynak otomatik atanır.")
